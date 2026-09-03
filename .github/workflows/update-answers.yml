@@ -1,0 +1,37 @@
+name: Daily past-answers refresh
+
+on:
+  schedule:
+    # 00:10 UTC, a little after midnight so the source has settled.
+    - cron: "10 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-answers
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run update-answers
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- data/past-answers.txt; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/past-answers.txt
+          git commit -m "chore: daily past-answers refresh"
+          git push origin HEAD:main
