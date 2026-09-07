@@ -25,7 +25,7 @@ interface RawTile {
   state: string;
   animation: string;
 }
-interface RawBoard {
+export interface RawBoard {
   rows: RawTile[][];
   keyboard: Record<string, string>;
   game: { status?: string; currentRowIndex?: number; printDate?: string; hardMode?: boolean } | null;
@@ -192,32 +192,7 @@ export class WordleSession {
   }
 
   private toBoard(raw: RawBoard): Board {
-    const rows: Row[] = raw.rows.map((tiles) => {
-      const mapped: Tile[] = tiles.map((t) => ({ letter: t.letter, state: asTileState(t.state) }));
-      const evaluated = mapped.length === 5 && mapped.every((t) => ["correct", "present", "absent"].includes(t.state));
-      return { word: mapped.map((t) => t.letter).join(""), tiles: mapped, evaluated };
-    });
-
-    const evaluatedCount = rows.filter((r) => r.evaluated).length;
-    const won = rows.some((r) => r.evaluated && r.tiles.every((t) => t.state === "correct"));
-    const statusFromDom = won ? "WIN" : evaluatedCount >= 6 ? "FAIL" : "IN_PROGRESS";
-    const status = isStatus(raw.game?.status) ? raw.game.status : statusFromDom;
-
-    const keyboard: Board["keyboard"] = {};
-    for (const [k, s] of Object.entries(raw.keyboard)) {
-      if (s === "correct" || s === "present" || s === "absent") keyboard[k] = s;
-    }
-
-    return {
-      puzzle: {
-        ...(raw.game?.printDate ? { date: raw.game.printDate } : {}),
-        ...(this.puzzleNumber ? { number: this.puzzleNumber } : {}),
-      },
-      status,
-      currentRow: raw.game?.currentRowIndex ?? evaluatedCount,
-      rows,
-      keyboard,
-    };
+    return boardFromRaw(raw, this.puzzleNumber);
   }
 
   private async waitFor(expr: string, timeoutMs: number): Promise<boolean> {
@@ -236,6 +211,53 @@ export class WordleSession {
       throw new WordleError("BROWSER", `Page script failed: ${(err as Error).message}`, { script: script.slice(0, 120) });
     }
   }
+}
+
+/**
+ * Reconciles the DOM read with NYT's persisted game state into a Board.
+ * Pure and browser-free so the reconciliation can be unit-tested.
+ *
+ * NYT keeps game state in a single localStorage key (`games-state-wordleV2/…`)
+ * whose `states` array spans multiple days; READ_BOARD hands us its LAST entry.
+ * On a day the tool has not actually played, that last entry is a *previous*
+ * day's finished game, so its `status`/`printDate` describe the wrong puzzle
+ * while `puzzleNumber` (read live off the landing page) is today's. Trusting
+ * the persisted status unconditionally then reports a WIN with zero rows and a
+ * stale date (workspace-l0t63). Fix: a terminal persisted status (WIN/FAIL) is
+ * honoured only when the board on screen corroborates it — at least one scored
+ * row — and its printDate rides the same condition. An IN_PROGRESS persisted
+ * status is always consistent with any board, so it is kept.
+ */
+export function boardFromRaw(raw: RawBoard, puzzleNumber: number | null): Board {
+  const rows: Row[] = raw.rows.map((tiles) => {
+    const mapped: Tile[] = tiles.map((t) => ({ letter: t.letter, state: asTileState(t.state) }));
+    const evaluated = mapped.length === 5 && mapped.every((t) => ["correct", "present", "absent"].includes(t.state));
+    return { word: mapped.map((t) => t.letter).join(""), tiles: mapped, evaluated };
+  });
+
+  const evaluatedCount = rows.filter((r) => r.evaluated).length;
+  const won = rows.some((r) => r.evaluated && r.tiles.every((t) => t.state === "correct"));
+  const statusFromDom = won ? "WIN" : evaluatedCount >= 6 ? "FAIL" : "IN_PROGRESS";
+
+  const persisted = isStatus(raw.game?.status) ? raw.game.status : undefined;
+  const persistedCorroborated = persisted === "IN_PROGRESS" || (persisted !== undefined && evaluatedCount > 0);
+  const status: Board["status"] = persistedCorroborated ? (persisted as Board["status"]) : statusFromDom;
+
+  const keyboard: Board["keyboard"] = {};
+  for (const [k, s] of Object.entries(raw.keyboard)) {
+    if (s === "correct" || s === "present" || s === "absent") keyboard[k] = s;
+  }
+
+  return {
+    puzzle: {
+      ...(persistedCorroborated && raw.game?.printDate ? { date: raw.game.printDate } : {}),
+      ...(puzzleNumber ? { number: puzzleNumber } : {}),
+    },
+    status,
+    currentRow: persistedCorroborated ? (raw.game?.currentRowIndex ?? evaluatedCount) : evaluatedCount,
+    rows,
+    keyboard,
+  };
 }
 
 function asTileState(s: string): TileState {
